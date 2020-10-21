@@ -19,7 +19,6 @@ from torch.nn.parallel import DistributedDataParallel
 # TODO: check imports and remove redundant
 import detectron2.utils.comm as comm
 from detectron2 import model_zoo
-from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
 from detectron2.modeling import  build_model
 from detectron2.checkpoint import DetectionCheckpointer, PeriodicCheckpointer
@@ -27,8 +26,8 @@ from detectron2.solver import build_lr_scheduler, build_optimizer
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultTrainer, default_argument_parser, default_setup, hooks, launch
 from detectron2.evaluation import (
-    CityscapesInstanceEvaluator,
-    CityscapesSemSegEvaluator,
+#     CityscapesInstanceEvaluator,
+#     CityscapesSemSegEvaluator,
     COCOEvaluator,
     COCOPanopticEvaluator,
     DatasetEvaluators,
@@ -69,19 +68,19 @@ def _setup(sm_args):
     # D2 expects ArgParser.NameSpace object to ammend Cfg node.
     # We are constructing artificial ArgParse object here. TODO: consider refactoring it in future.
     
-    # based on user input, selecting a correct base config file
-    if sm_args.local_config_file != None:
-        config_file_path = f"{os.environ['SM_MODULE_DIR']}/{sm_args.local_config_file}"
-    else:
-        config_file_path = f"{os.environ['SM_MODULE_DIR']}/detectron2/configs/{sm_args.config_file}"
-        
+
+    config_file_path = f"/opt/ml/code/detectron2/configs/{sm_args.config_file}" # could just supply a config in source_dir
     
-    d2_args = _custom_argument_parser(config_file_path, sm_args.opts, sm_args.resume, sm_args.eval_only)
+    d2_args = _custom_argument_parser(config_file_path, sm_args.opts, sm_args.resume, sm_args.eval_only, sm_args.spot_ckpt)
     
     cfg = get_cfg()
     cfg.merge_from_file(config_file_path) # get baseline parameters from YAML config
     list_opts = _opts_to_list(sm_args.opts) # convert training hyperparameters from SM format to D2
     cfg.merge_from_list(list_opts) # override defaults params from D2 config_file with user defined hyperparameters
+    
+    if (sm_args.spot_ckpt!='')&(sm_args.spot_ckpt is not None):
+        os.system(f"aws s3 cp {sm_args.spot_ckpt} /opt/ml/checkpoints/{sm_args.spot_ckpt.split('/')[-1]}")
+        cfg.MODEL.WEIGHTS = f"/opt/ml/checkpoints/{sm_args.spot_ckpt.split('/')[-1]}"
 
     # Parameters below are hardcoded as they are specific to Sagemaker environment, no configuration needed.
     _, _ , world_size = _get_sm_world_size(sm_args)
@@ -94,7 +93,7 @@ def _setup(sm_args):
     return cfg
     
 
-def _custom_argument_parser(config_file, opts, resume, eval_only):
+def _custom_argument_parser(config_file, opts, resume, eval_only, spot_ckpt=None):
     """
     Create a parser with some common arguments for Detectron2 training script.
     Returns:
@@ -105,10 +104,12 @@ def _custom_argument_parser(config_file, opts, resume, eval_only):
     parser.add_argument("--opts",default=None ,help="Modify config options using the command-line")
     parser.add_argument("--resume", type=str, default="True", help="whether to attempt to resume from the checkpoint directory",)
     parser.add_argument("--eval-only", type=str, default="False", help="perform evaluation only")
+    parser.add_argument("--spot-ckpt", type=str, default=None, help='Spot checkpoint to resume training from')
     
     args = parser.parse_args(["--config-file", config_file,
                              "--resume", resume,
                              "--eval-only", eval_only,
+                             "--spot-ckpt", spot_ckpt,
                              "--opts", opts])
     return args
 
@@ -231,6 +232,9 @@ def do_train(cfg, model, resume=False):
     checkpointer = DetectionCheckpointer(
         model, cfg.OUTPUT_DIR, optimizer=optimizer, scheduler=scheduler
     )
+    checkpointer_spot = DetectionCheckpointer(
+        model, '/opt/ml/checkpoints', optimizer=optimizer, scheduler=scheduler
+    )
     start_iter = (
         checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=resume).get("iteration", -1) + 1
     )
@@ -239,6 +243,9 @@ def do_train(cfg, model, resume=False):
     periodic_checkpointer = PeriodicCheckpointer(
         checkpointer, cfg.SOLVER.CHECKPOINT_PERIOD, max_iter=max_iter
     )
+    periodic_checkpointer_spot = PeriodicCheckpointer(
+        checkpointer_spot, cfg.SOLVER.CHECKPOINT_PERIOD, max_iter=max_iter
+    )    
 
     writers = (
         [
@@ -287,14 +294,15 @@ def do_train(cfg, model, resume=False):
                 for writer in writers:
                     writer.write()
             periodic_checkpointer.step(iteration)
+            periodic_checkpointer_spot.step(iteration)
 
             
 
 def main(sm_args):
     
-    cfg = _setup(sm_args)
+    cfg = _setup(sm_args) # generate config file
     
-    model = build_model(cfg)
+    model = build_model(cfg) # build model based on config 
     
     # Converting string params to boolean flags as Sagemaker doesn't support currently boolean flags as hyperparameters.
     eval_only = True if sm_args.eval_only=="True" else False
@@ -332,6 +340,7 @@ if __name__ == "__main__":
     parser.add_argument('--num-cpus', type=int, default=os.environ["SM_NUM_CPUS"])
     parser.add_argument('--resume', type=str, default="True")
     parser.add_argument('--eval-only', type=str, default="False")
+    parser.add_argument('--spot_ckpt', type=str, default=None)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--config-file', type=str, default=None, metavar="FILE", help="If config file specificed, then one of the Detectron2 configs will be used. \
                        Refer to https://github.com/facebookresearch/detectron2/tree/master/configs")
@@ -347,6 +356,14 @@ if __name__ == "__main__":
     machine_rank = sm_args.hosts.index(sm_args.current_host)
     master_addr = sm_args.hosts[0]
     master_port = '55555'
+    
+    os.system('ls /opt/ml/input/data')
+    os.system('echo ---------------------')
+    os.system('ls /opt/ml/input/data/training')
+    os.system('echo ---------------------')
+    os.system('ls /opt/ml/input/data/training/coco')
+    os.system('mkdir /opt/ml/checkpoints')
+
         
     # Launch D2 distributed training
     launch(

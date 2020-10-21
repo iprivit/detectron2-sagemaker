@@ -8,7 +8,8 @@ LABEL author="vadimd@amazon.com"
 ############# Installing latest builds ############
 
 # This is to fix issue: https://github.com/pytorch/vision/issues/1489
-RUN pip install --upgrade --force-reinstall torchvision cython
+# RUN pip install --upgrade --force-reinstall torchvision cython
+# torch
 
 ############# D2 section ##############
 
@@ -21,12 +22,14 @@ ENV FORCE_CUDA="1"
 ENV TORCH_CUDA_ARCH_LIST="Volta" 
 
 # Build D2 from latest sources
-RUN pip install 'git+https://github.com/facebookresearch/detectron2.git'
+# RUN pip install 'git+https://github.com/zhanghang1989/detectron2-ResNeSt.git'
+# https://github.com/zhanghang1989/detectron2-ResNeSt.git
+# https://github.com/facebookresearch/detectron2.git
 
 # Set a fixed model cache directory. Detectron2 requirement
 ENV FVCORE_CACHE="/tmp"
 # set location of training datasetm, Sagemaker containers copy all data from S3 to /opt/ml/input/data/{channels}
-ENV DETECTRON2_DATASETS="/opt/ml/input/data/training/coco"
+ENV DETECTRON2_DATASETS="/opt/ml/input/data/train"
 
 ############# SageMaker section ##############
 
@@ -35,9 +38,11 @@ WORKDIR /opt/ml/code
 
 # cloning D2 to code dir as we need access to default congigs
 RUN git clone 'https://github.com/facebookresearch/detectron2.git'
+RUN cd detectron2 && git checkout be792b9 
+RUN python -m pip install -e detectron2
 
 ENV SAGEMAKER_SUBMIT_DIRECTORY /opt/ml/code
-ENV SAGEMAKER_PROGRAM train_coco.py
+ENV SAGEMAKER_PROGRAM train_coco_efs.py
 
 WORKDIR /
 
