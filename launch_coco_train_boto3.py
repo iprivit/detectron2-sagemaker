@@ -5,19 +5,14 @@ import json
 import os
 import numpy as np
 import pandas as pd
-from sagemaker import get_execution_role
 import argh
 from argh import arg
-import sagemaker
 from time import gmtime, strftime
 
-sess = sagemaker.Session() # can use LocalSession() to run container locally
-account = sess.boto_session.client('sts').get_caller_identity()['Account']
+account = boto3.client('sts').get_caller_identity()['Account']
 sm_client = boto3.client('sagemaker')
- #f"s3://{bucket}/{prefix_output}"
 
-
-@arg('--bucket', help='s3 bucket for data retrieval and storage of results', default=sess.default_bucket())
+@arg('--bucket', help='s3 bucket for data retrieval and storage of results', default=None)
 @arg('--image_name', help='Name of the Docker image to be used for training')
 @arg('--region', help='', default='us-east-1')
 @arg('--prefix_input', help='', default='detectron2-input')
@@ -28,13 +23,12 @@ sm_client = boto3.client('sagemaker')
 @arg('--instance_type', help='Type of EC2 instances to train on, for ', default='ml.p3.16xlarge')
 @arg('--volume_size', help='Size of EBS volume attached to instance', default=100)
 @arg('--use_spot', help='Whether to use spot instances for training', default=False)
-@arg('--d2_config', help='Detectron2 configuration file to use', default="COCO-InstanceSegmentation/mask_rcnn_R_101_C4_3x.yaml")
 @arg('--metric_path', help='Location for metric definition file', default=None)
 @arg('--role', help='SageMaker execution role', default=None)
 @arg('--max_run_time', help='', default=80000)
 @arg('--max_wait_time', help='', default=None)
 @arg('--hyperparam_path', help='Location for hyperparameters file', default=None)
-def run_d2_sm(bucket=sess.default_bucket(), 
+def run_d2_sm(bucket=None, 
               image_name=None, 
               metric_path=None, 
               job_name='d2-coco-train', 
@@ -49,18 +43,19 @@ def run_d2_sm(bucket=sess.default_bucket(),
               role=None, 
               max_run_time=80000, 
               max_wait_time=None,
-             d2_config="COCO-InstanceSegmentation/mask_rcnn_R_101_C4_3x.yaml", 
               hyperparam_path=None):
     """
     Utility for launching detectron2 training jobs using boto3 create_training_job API.
     Has options for launching jobs using spot instances, if launching spot,
     please set max_wait_time variable. Check different methods for additional documentation
     """
+    assert bucket!=None, "Please specify a s3 bucket"
+    assert role!=None, "Please specify a SageMaker Execution Role"
+    assert hyperparam_path!=None, 'Please specify hyperparameters'
+    
     s3_outpath = f's3://{bucket}/{prefix_output}/'
     if not image_name:
         image_name = f'{account}.dkr.ecr.{region}.amazonaws.com/d2-sm-coco:distributed'
-    if not role:
-        role = get_execution_role()
     metric_definitions = []
     with open(metric_path, 'r') as f:
         for line in f:
@@ -70,7 +65,7 @@ def run_d2_sm(bucket=sess.default_bucket(),
         hyperparameters = json.load(f)
     
     if use_spot:
-        checkpoint_s3_uri = f"s3://{bucket}/"
+        checkpoint_s3_uri = f"s3://{bucket}/checkpoints"
         stop_cond = {
               'MaxRuntimeInSeconds': max_run_time,
               'MaxWaitTimeInSeconds': max_wait_time
@@ -80,6 +75,9 @@ def run_d2_sm(bucket=sess.default_bucket(),
         stop_cond = {
               'MaxRuntimeInSeconds': max_run_time,
           }
+        
+    data_path = f's3://{bucket}/{data_prefix}'
+    print(f'Grabbing data from {data_path}')
     
     sm_client.create_training_job(
 
@@ -95,14 +93,15 @@ def run_d2_sm(bucket=sess.default_bucket(),
           RoleArn=role,
           InputDataConfig=[
               {
-                  'ChannelName': 'string',
+                  'ChannelName': 'training',
                   'DataSource': {
                       'S3DataSource': {
                           'S3DataType': 'S3Prefix',
-                          'S3Uri': f's3://{bucket}/{data_prefix}',
+                          'S3Uri': data_path,
                           'S3DataDistributionType': 'FullyReplicated', # |'ShardedByS3Key'
 
                       },
+                      # use this to specify an EFS volume
     #                   'FileSystemDataSource': {
     #                       'FileSystemId': 'string',
     #                       'FileSystemAccessMode': 'rw'|'ro',
@@ -127,6 +126,7 @@ def run_d2_sm(bucket=sess.default_bucket(),
               'InstanceCount': instance_count,
               'VolumeSizeInGB': volume_size,
           },
+        # use for specifying training within a specific VPC
     #       VpcConfig={
     #           'SecurityGroupIds': [
     #               'string',
