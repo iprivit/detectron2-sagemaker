@@ -79,7 +79,7 @@ def run_d2_sm(bucket=None,
     #                                   train_instance_type="local_gpu", # use local_gpu for quick troubleshooting
                                        train_volume_size=volume_size,
                                        train_use_spot_instances=use_spot,
-                                       output_path="s3://{}/{}".format(bucket, prefix_output),
+                                       output_path=f"s3://{bucket}/{prefix_output}",
                                        metric_definitions = metric_definitions,
                                        hyperparameters = hyperparameters, 
                                        sagemaker_session=sess,
@@ -87,7 +87,10 @@ def run_d2_sm(bucket=None,
                                        train_max_wait=max_wait_time,
                                        checkpoint_s3_uri=checkpoint_s3_uri)
 
-    d2.fit({'training':f"s3://{bucket}/coco"},
+    data_path = f"s3://{bucket}/{data_prefix}"
+    print(f'Grabbing data from {data_path}')
+
+    d2.fit({'training':data_path},
            job_name = job_name,
            wait=False) 
     print('Job launched!')
